@@ -15,7 +15,7 @@ const mapObj = (fn, o) => {
   return newO
 }
 
-const divWhitelist = [ 'title', 'meta', 'head', 'circle' ]
+const divWhitelist = [ 'title', 'meta', 'head', 'circle', 'col' ]
 const flatToCamel = {
   novalidate: 'noValidate',
   tabindex: 'tabIndex',
@@ -26,15 +26,15 @@ const flatToCamel = {
 }
 
 export default function createElement(key, fullname, props, ...args) {
-  props = props || {};
-  const view = this;
+  props = props || {}
+  const view = this
 
-  let name = fullname;
-  let tag;
+  let name = fullname
+  let tag, originalTag
 
   // find element
   if (typeof fullname != 'string') {
-    tag = fullname;
+    tag = fullname
   }
   else {
     const isHTMLElement = (
@@ -49,19 +49,20 @@ export default function createElement(key, fullname, props, ...args) {
         : [fullname, fullname]
 
       if (divWhitelist.indexOf(tag) !== -1) {
+        originalTag = tag
         tag = 'div'
       }
 
       // lowercase => camelcase, autoplay => autoPlay, to please React
       Object.keys(flatToCamel).forEach(prop => {
         if (props[prop]) {
-          props[flatToCamel[prop]] = props[prop] || true;
+          props[flatToCamel[prop]] = props[prop] || true
           delete props[prop]
         }
       })
     }
     else {
-      tag = view.Flint.getView(name);
+      tag = view.Flint.getView(name)
     }
   }
 
@@ -69,7 +70,7 @@ export default function createElement(key, fullname, props, ...args) {
     props.className = classnames(props.className)
 
   // TRANSFORMATIONS:
-  elementStyles(key, view, name, tag, props);
+  elementStyles(key, view, name, originalTag || tag, props)
 
   if (!props.key && !props.nokey) {
     props.key = props.repeat ? key() : key
@@ -83,14 +84,14 @@ export default function createElement(key, fullname, props, ...args) {
 
   // onEnter
   if (props.onEnter) {
-    let originalKeyDown = props.onKeyDown;
+    let originalKeyDown = props.onKeyDown
 
     props.onKeyDown = function(e) {
       if (e.keyCode === 13)
-        props.onEnter(e.target.value);
+        props.onEnter(e.target.value)
 
       if (originalKeyDown)
-        originalKeyDown(e);
+        originalKeyDown(e)
     }
   }
 
@@ -119,5 +120,5 @@ export default function createElement(key, fullname, props, ...args) {
     }
   }
 
-  return React.createElement(tag, props, ...args);
-};
+  return React.createElement(tag, props, ...args)
+}

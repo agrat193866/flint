@@ -7,15 +7,13 @@ import npm from './npm'
 import log from './lib/log'
 import cache from './cache'
 import unicodeToChar from './lib/unicodeToChar'
-import {
-  p,
-  mkdir, readdir,
-  readJSON, writeJSON,
-  readFile, writeFile,
-  recreateDir,
-  copyFile } from './lib/fns'
-
+import { p, mkdir, readdir, readJSON, writeJSON,
+  readFile, writeFile, recreateDir, copyFile } from './lib/fns'
 import { Promise } from 'bluebird'
+import multipipe from 'multipipe'
+import portfinder from 'portfinder'
+import open from 'open'
+import editor from 'editor'
 import keypress from 'keypress'
 import path from 'path'
 import express from 'express'
@@ -23,19 +21,8 @@ import cors from 'cors'
 import hostile from 'hostile'
 import through from 'through2'
 import gulp from 'gulp'
-import rename from 'gulp-rename'
-import watch from 'gulp-watch'
-import filter from 'gulp-filter'
-import plumber from 'gulp-plumber'
-import debug from 'gulp-debug'
-import changed from 'gulp-changed'
-import concat from 'gulp-concat'
-import wrap from 'gulp-wrap'
-import multipipe from 'multipipe'
-import gulpif from 'gulp-if'
-import portfinder from 'portfinder'
-import open from 'open'
-import editor from 'editor'
+import loadPlugins from 'gulp-load-plugins'
+const $ = loadPlugins()
 
 Promise.longStackTraces()
 
@@ -122,6 +109,7 @@ function pipefn(fn) {
     next(null, file);
   })
 }
+const Z = pipefn()
 
 function cat(msg) {
   return pipefn(() => msg && console.log(msg))
@@ -193,55 +181,39 @@ const watchDeletes = vinyl => {
 }
 
 function buildScripts(cb, stream) {
+  console.log("Building...".bold.white)
   log('build scripts')
-  let gulpErr, gulpScript, curFile
-  let gulpStartTime = Date.now();
-  let gulpDest = OPTS.buildDir ? p(OPTS.buildDir, '_') : OPTS.outDir || '.';
-  let buildingTimeout
+  let lastError, lastScript, curFile, buildingTimeout
+  let startTime = Date.now()
+  let dest = OPTS.buildDir ? p(OPTS.buildDir, '_') : OPTS.outDir || '.'
 
   return (stream || gulp.src(SCRIPTS_GLOB))
-    .pipe(gulpif(!OPTS.build,
-      watch(SCRIPTS_GLOB, null, watchDeletes)
+    .pipe($.if(!OPTS.build,
+      $.watch(SCRIPTS_GLOB, null, watchDeletes)
     ))
     .pipe(pipefn(file => {
       // reset
       curFile = file
-      gulpErr = false
-      gulpScript = null
+      lastError = false
+      lastScript = null
       // time build
-      gulpStartTime = Date.now()
-      file.startTime = gulpStartTime
+      startTime = Date.now()
+      file.startTime = startTime
+      // log
+      console.log(' ⇢ ', path.relative(APP_DIR, file.path))
     }))
-    .pipe(debug({ title: 'build:', minimal: true }))
-    .pipe(plumber(err => {
-      gulpErr = true
-
-      if (err.stack || err.codeFrame)
-        err.stack = unicodeToChar(err.stack || err.codeFrame);
-
-      if (err.plugin == 'gulp-babel') {
-        console.log('JS error: %s: ', err.message.replace(APP_DIR, ''));
-        if (err.name != 'TypeError' && err.loc)
-          console.log('  > line: %s, col: %s', err.loc.line, err.loc.column);
-        console.log(' Stack:', newLine, err.stack)
-      }
-      else {
-        console.log('ERROR', "\n", err)
-        console.log('FILE', "\n", curFile.contents.toString())
-      }
-
-      var path = err.fileName
-
-      bridge.message('compile:error', { error: err });
+    .pipe($.plumber(error => {
+      lastError = true
+      logError(error, curFile)
+      bridge.message('compile:error', { error })
     }))
     .pipe(pipefn(file => {
       if (OPTS.build) return
       let name = file.path.replace(APP_DIR, '')
-      gulpScript = { name, compiledAt: gulpStartTime }
+      lastScript = { name, compiledAt: startTime }
+      curFile = file
     }))
-    .pipe(pipefn(file => { curFile = file }))
     .pipe(compiler('pre'))
-    .pipe(pipefn(file => { curFile = file }))
     .pipe(babel({
       stage: 2,
       blacklist: ['flow', 'react', 'es6.tailCall'],
@@ -249,7 +221,6 @@ function buildScripts(cb, stream) {
       comments: true,
       optional: ['bluebirdCoroutines']
     }))
-    .pipe(pipefn(file => { curFile = file }))
     .pipe(compiler('post', {
       dir: APP_FLINT_DIR,
       onPackageStart: (name) => {
@@ -262,27 +233,27 @@ function buildScripts(cb, stream) {
         if (OPTS.build) return
         log('runner: onPackageFinish: ', name)
         bridge.message('package:installed', { name })
-        bridge.message('packages:reload', {})
+        updatePackages()
       }
     }))
-    .pipe(pipefn(file => { curFile = file }))
-    // .pipe(pipefn(file => console.log(file.contents.toString())))
-    .pipe(gulpif(!stream, rename({ extname: '.js' })))
+    .pipe($.if(!stream,
+      $.rename({ extname: '.js' })
+    ))
     .pipe(react({
       stripTypes: true,
       es6module: true
     }))
-    .pipe(gulpif(OPTS.build,
+    .pipe($.if(OPTS.build,
       multipipe(
-        concat(OPTS.name + '.js'),
-        wrap({ src: __dirname + '/../templates/build.template.js' }, { name: OPTS.name } , { variable: 'data' })
+        $.concat(OPTS.name + '.js'),
+        $.wrap({ src: __dirname + '/../templates/build.template.js' }, { name: OPTS.name } , { variable: 'data' })
       )
     ))
-    .pipe(gulpif(function(file) {
+    .pipe($.if(function(file) {
       if (stream) return false
-      if (gulpErr) return false
+      if (lastError) return false
 
-      const endTime = Date.now() - gulpStartTime;
+      const endTime = Date.now() - startTime;
       log('build took ', endTime, 'ms')
 
       const isNew = (
@@ -297,17 +268,17 @@ function buildScripts(cb, stream) {
       }
       return false
     },
-      gulp.dest(gulpDest))
+      gulp.dest(dest))
     )
     .pipe(pipefn(file => {
       log('HAS_RUN_INITIAL_BUILD', HAS_RUN_INITIAL_BUILD)
-      log('gulpErr', gulpErr)
+      log('lastError', lastError)
 
       // after initial build
       if (HAS_RUN_INITIAL_BUILD) {
-        if (!gulpErr) {
-          bridge.message('script:add', gulpScript);
-          bridge.message('compile:success', gulpScript);
+        if (!lastError) {
+          bridge.message('script:add', lastScript);
+          bridge.message('compile:success', lastScript);
         }
       }
       // before initial build
@@ -321,6 +292,28 @@ function buildScripts(cb, stream) {
     }))
     .pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn())
     .pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn())
+    .pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn())
+    .pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn())
+}
+
+function logError(error, file) {
+  if (error.stack || error.codeFrame)
+    error.stack = unicodeToChar(error.stack || error.codeFrame);
+
+  if (error.plugin == 'gulp-babel') {
+    console.log('JS error: %s: ', error.message.replace(APP_DIR, ''));
+    if (error.name != 'TypeError' && error.loc)
+      console.log('  > line: %s, col: %s', error.loc.line, error.loc.column);
+    console.log(' Stack:', newLine, error.stack)
+  }
+  else {
+    console.log('ERROR', "\n", error)
+    console.log('FILE', "\n", file.contents.toString())
+  }
+}
+
+function updatePackages() {
+  bridge.message('packages:reload', {})
 }
 
 function setOptions(opts, build) {
@@ -359,7 +352,7 @@ function listenForKeys() {
   keypress(proc.stdin)
 
   // listen for the "keypress" event
-  proc.stdin.on('keypress', function (ch, key) {
+  proc.stdin.on('keypress', async function (ch, key) {
     if (!key) return
 
     switch(key.name) {
@@ -370,7 +363,10 @@ function listenForKeys() {
         editor('.')
         break
       case 'i': // install npm
-        npm.install()
+        console.log("Installing npm packages...".white.bold)
+        await npm.bundle()
+        updatePackages()
+        console.log('Packages updated!'.green.bold)
         break
       case 'v': // verbose logging
         OPTS.verbose = !OPTS.verbose

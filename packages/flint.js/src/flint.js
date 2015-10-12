@@ -1,7 +1,6 @@
 import 'reapp-object-assign'
 import ee from 'event-emitter'
 import resolveStyles from 'flint-radium/lib/resolve-styles'
-// import Radium from 'radium'
 import React from 'react'
 import ReactDOM from 'react-dom'
 import raf from 'raf'
@@ -12,7 +11,6 @@ import Bluebird, { Promise } from 'bluebird'
 import './lib/setRoot'
 import './lib/shimFlintMap'
 import arrayDiff from './lib/arrayDiff'
-import assignToGlobal from './lib/assignToGlobal'
 import on from './lib/on'
 import createElement from './tag/createElement'
 import Wrapper from './views/Wrapper'
@@ -29,24 +27,18 @@ root.Promise = Promise
 root.module = {}
 root.fetchJSON = (...args) => fetch(...args).then(res => res.json())
 root.onerror = reportError
-// shim view
-root.view = { update: () => {} }
+root.view = { update: () => {} } // shim view
 
 const uuid = () => Math.floor(Math.random() * 1000000)
-
 const runEvents = (queue, name) =>
   queue && queue[name].length && queue[name].forEach(e => e())
-
 const safeRun = fn => {
-  if (process.env.production)
-    fn()
+  if (process.env.production) fn()
   else {
-    try {
-      fn()
-    }
+    try { fn() }
     catch(e) {
-      const { name, message, stack } = e
       console.error(e)
+      const { name, message, stack } = e
       reportError({ name, message, stack })
     }
   }
@@ -56,16 +48,13 @@ function run(browserNode, userOpts, afterRenderCb) {
   const opts = Object.assign({
     namespace: {},
     entry: 'Main'
-  }, userOpts);
+  }, userOpts)
 
-  // put Flint instance on root given app name
-  // tools uses this (root.devTools)
+  // either on window or namespace
   if (opts.namespace !== root && opts.app)
     root[opts.app] = opts.namespace
 
-  const isTools = opts.app == 'devTools'
   let firstRun = false
-
   const render = () => {
     const run = () => {
       const MainComponent = getComponent('Main') || mainComponent;
@@ -91,9 +80,20 @@ function run(browserNode, userOpts, afterRenderCb) {
     }
   }
 
+  // exported tracks previous exports so we can overwrite
+  let exported = {}
+  const assignToGlobal = (name, val) => {
+    if (!exported[name] && typeof root[name] != 'undefined')
+      throw `You're attempting to define a global that is already defined:
+          ${name} = ${JSON.stringify(root[name])}`
+
+    exported[name] = true
+    root[name] = val
+  }
+
   const removeComponent = key => {
-    Flint.views[key] = undefined
-    root[key] = undefined
+    delete Flint.views[key]
+    delete opts.namespace[key]
   }
 
   const setComponent = (key, val) => (opts.namespace[key] = val)
@@ -101,20 +101,14 @@ function run(browserNode, userOpts, afterRenderCb) {
   const emitter = ee({})
 
   let Flint = {
-    id: uuid(),
-    activeViews: {},
     isUpdating: false,
     views: {},
     lastWorkingView: {},
     // async functions needed before loading app
     preloaders: [],
-    routes: null,
-
     element: createElement,
     render,
-
     on(name, cb) { emitter.on(name, cb) },
-
     // map of views in various files
     viewCache: {},
     // current build up of running hot insertion
@@ -132,23 +126,27 @@ function run(browserNode, userOpts, afterRenderCb) {
       Flint.setExports(fileExports)
       const cached = Flint.viewCache[file] || []
       const views = Flint.viewsInFile[file]
-      const added = arrayDiff(views, cached)
-      const removed = arrayDiff(cached, views)
 
       // remove views that werent made
+      const removed = arrayDiff(cached, views)
       removed.map(removeComponent)
+
       Flint.currentHotFile = null
       Flint.viewCache[file] = Flint.viewsInFile[file]
+
       raf(() => {
-        Flint.activeViews.Main &&
-        Flint.activeViews.Main.isMounted &&
-        Flint.activeViews.Main.forceUpdate()
+        Flint.isLoadingFile = true
+        render()
+        Flint.isLoadingFile = false
+
+        // its been updated
+        Object.keys(Flint.views).forEach(key => {
+          Flint.views[key].needsUpdate = false
+        })
       })
     },
 
     makeReactComponent(name, component, options = {}) {
-      let id;
-
       const spec = {
         displayName: name,
         el: createElement,
@@ -156,15 +154,20 @@ function run(browserNode, userOpts, afterRenderCb) {
         Flint,
 
         update() {
-          if (!Flint.isUpdating && this.hasRun && this.isMounted && !this.isPaused)
+          if (
+            !Flint.isUpdating &&
+            this.hasRun &&
+            this.isMounted &&
+            !this.isPaused
+          )
             this.forceUpdate()
         },
 
         getInitialState() {
-          id = (name == 'Main') ? 'Main' : uuid();
+          if (name == 'Main')
+            Flint.mainView = this
 
-          this.styles = {};
-          this.entityId = id;
+          this.styles = {}
           this.events = {
             mount: [],
             unmount: [],
@@ -178,23 +181,27 @@ function run(browserNode, userOpts, afterRenderCb) {
               return on(scope, name, cb)
             else
               return on(this, scope, name)
-          };
+          }
 
            // watch for errors with ran
-          let ran = false;
+          let ran = false
 
-          safeRun(() => {
-            component.call(void 0, this, viewOn)
-            ran = true
-          })
+          // TODO: comments out part was attempt to save child
+          // state when parent is reloaded, but wed need path key
+          // needsUpdate if hash changed
+          // if (Flint.views[name].needsUpdate) {
+            safeRun(() => {
+              component.call(void 0, this, viewOn)
+              // Flint.cachedRenders[name] = this._render
+              ran = true
+            })
+          // }
+          // else {
+          //   this._render = Flint.cachedRenders[name]
+          // }
 
-          if (!ran)
-            return null
-
-          this.hasRun = true;
-          Flint.activeViews[id] = this;
-
-          return null;
+          this.hasRun = ran
+          return null
         },
 
         componentWillReceiveProps(nextProps) {
@@ -210,7 +217,6 @@ function run(browserNode, userOpts, afterRenderCb) {
         componentWillUnmount() {
           this.isMounted = false
           runEvents(this.events, 'unmount')
-          delete Flint.activeViews[id];
         },
 
         componentWillUpdate() {
@@ -237,12 +243,6 @@ function run(browserNode, userOpts, afterRenderCb) {
 
           this.getChildContext = () => obj
         },
-
-        // propTypes(obj) {
-        //   if (!obj) return
-        //
-        //   this.constructor.propTypes = obj
-        // },
 
         render() {
           let els
@@ -287,7 +287,7 @@ function run(browserNode, userOpts, afterRenderCb) {
       // TODO: this fixes importing a react element, but its sloppy
       // import Element from 'some-element'; can be used <Element>
       if (root[name])
-        return root[name];
+        return root[name]
 
       // View.SubView
       const subName = `${view}.${name}`
@@ -295,14 +295,12 @@ function run(browserNode, userOpts, afterRenderCb) {
         return Flint.views[subName].component
 
       // regular view
-      if (Flint.views[name]) {
+      if (Flint.views[name])
         return Flint.views[name].component;
-      }
 
       // "global" views
-      const namespaceView = opts.namespace[name] || root[name];
-      if (namespaceView)
-        return namespaceView;
+      if (opts.namespace[name] || root[name])
+        return namespaceView
 
       return class NotFound extends React.Component {
         render() {
@@ -312,22 +310,29 @@ function run(browserNode, userOpts, afterRenderCb) {
       }
     },
 
+    /*
+      hash is the build systems hash of the view contents
+        used for detecting changed views
+    */
     view(name, hash, component) {
       Flint.viewsInFile[Flint.currentHotFile].push(name)
 
-      // if new view
+      // if new
       if (Flint.views[name] == undefined) {
-        let fComponent = Flint.makeReactComponent(name, component, { isNew: true });
+        let fComponent = Flint.makeReactComponent(name, component, {
+          isNew: true,
+          hash
+        });
+
         Flint.views[name] = Flint.makeView(hash, fComponent);
         Flint.lastWorkingView[name] = Flint.views[name].component;
         setComponent(name, fComponent) // puts on namespace
         return
       }
 
-      // not new view
+      // not new
 
-      // if view was defined twice
-      // (in codebase twice during first run)
+      // if defined twice during first run
       if (firstRun) {
         console.error('Defined a view twice!', name, hash)
         setComponent(name, ErrorDefinedTwice(name))
@@ -338,10 +343,11 @@ function run(browserNode, userOpts, afterRenderCb) {
       if (Flint.views[name].hash == hash)
         return
 
-      // start with a success and maybe an error will fire before next frame
+      // start with a success and an error will fire before next frame
       root._DT.emitter.emit('runtime:success')
 
       // if changed
+
       const setView = (name, flintComponent) => {
         Flint.views[name] = Flint.makeView(hash, flintComponent)
         setComponent(name, flintComponent) // puts on namespace
@@ -369,35 +375,25 @@ function run(browserNode, userOpts, afterRenderCb) {
           Flint.lastWorkingView[name] = Flint.views[name].component
       })
 
-      let flintComponent = Flint.makeReactComponent(name, component, { isChanged: true });
-      setView(name, flintComponent);
-      window.onViewLoaded() //tools errors todo
-    },
+      let flintComponent = Flint.makeReactComponent(name, component, { isChanged: true })
+      setView(name, flintComponent)
 
-    // make all array methods non-mutative
-    shimProperties(id, name, val) {
-      if (Array.isArray(val)) {
-        // add ref to array
-        val.__flintRef = { id, name };
-      }
+      // tools errors todo
+      window.onViewLoaded()
     },
 
     makeView(hash, component) {
-      return { hash, component };
+      return { hash, component, needsUpdate: true };
     },
 
     getStyle(id, name) {
       return Flint.styles && Flint.styles[id][name]
     },
 
-    addRoutes(routes) {
-      Flint.routes = routes
-    },
-
     // export globals
     setExports(_exports) {
       if (!_exports) return
-      const names = Object.keys(_exports);
+      const names = Object.keys(_exports)
 
       if (names.length) {
         names.forEach(name => {
@@ -411,21 +407,19 @@ function run(browserNode, userOpts, afterRenderCb) {
         })
       }
     }
-  };
+  }
 
   // make mutative array methods trigger updates in views
-  ['push', 'reverse', 'splice', 'shift', 'pop', 'unshift', 'sort'].map(method => {
-    const vanilla = Array.prototype[method];
+  const mutators = ['push', 'reverse', 'splice', 'shift', 'pop', 'unshift', 'sort']
+  mutators.map(method => {
+    const vanilla = Array.prototype[method]
 
     Array.prototype[method] = function(...args) {
-      const result = vanilla.apply(this, args);
+      const result = vanilla.apply(this, args)
 
-      if (this.__flintRef) {
-        Flint.set(this.__flintRef.id, this.__flintRef.name, this)
-        Flint.setViews();
-      }
+      // do view update
 
-      return result;
+      return result
     }
   })
 

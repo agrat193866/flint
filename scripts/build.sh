@@ -1,7 +1,13 @@
 #!/bin/sh
+
 set -e
 
+# kill bg tasks on exit
+trap 'kill $(jobs -p)' EXIT
+
+# build
 for f in packages/*; do
+  # webpack packages
   if [ -f "$f/webpack.config.js" ]; then
     cd $f
     for file in webpack.config*; do
@@ -9,6 +15,7 @@ for f in packages/*; do
       echo "running webpack for config $file"
     done
     cd ../..
+  # or just babel
   elif [ -d "$f/src" ]; then
     echo "running babel on $f"
     node node_modules/babel/bin/babel "$f/src" --out-dir "$f/lib" \
@@ -20,13 +27,15 @@ for f in packages/*; do
   fi
 done
 
+# extra stuff for watch
 if [ $1="--watch" ]; then
-  # Relink CLI watcher
-  echo "Watching CLI for relink"
+  # relink cli
+  echo "Watch CLI for relink"
   chsum1=""
   cd packages/cli
 
   sleep 2
+  hasLinkedOnce='false'
   while [[ true ]]
   do
     if [ -d 'lib' ]; then
@@ -34,9 +43,20 @@ if [ $1="--watch" ]; then
       if [[ $chsum1 != $chsum2 ]] ; then
         npm link
         chsum1=$chsum2
+
+        # watch tools after first build
+        if [ $hasLinkedOnce == 'false' ]; then
+          cd ../..
+          cd apps/tools
+          flint build --watch &
+          cd ../..
+          cd packages/cli
+        fi
+
+        hasLinkedOnce='true'
       fi
     fi
-    sleep 2
+    sleep 1
   done
 fi
 
