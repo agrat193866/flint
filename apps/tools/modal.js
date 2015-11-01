@@ -1,49 +1,54 @@
 view Modal {
+  view.pause()
+
+  let children, title, open
+
+  on('props', setMessage)
+
+  function setMessage() {
+    open = view.props.open
+
+    // cache last children when empty
+    if (title && !view.props.title)
+      return view.update()
+
+    title = view.props.title
+    children = view.props.children
+    view.update()
+  }
+
   <modal>
-    <close onClick={^onClose}>X</close>
-    <title if={^title}>{^title}</title>
-    <message>{^children}</message>
+    <Close size={25} />
+    <title if={title}>{title}</title>
+    <message if={children}>{children}</message>
   </modal>
 
   $ = {
-    position: 'absolute',
-    top: ^open ? 20 : -100,
-    left: 20,
+    position: 'fixed',
+    top: open ? 0 : -140,
+    left: 0,
+    minWidth: 80,
     padding: [10, 10],
-    background: '#f9f9f9',
-    border: '1px solid #ddd',
-    boxShadow: '0 0 8px rgba(0,0,0,0.05)',
-    borderRadius: 4,
-    fontSize: 15,
+    margin: 20,
+    background: '#fff',
+    boxShadow: '0 0 20px rgba(0,0,0,0.05)',
+    border: '1px solid #dfdfdf',
+    borderTop: '2px solid crimson',
+    fontSize: 13,
     transition: 'all ease-in 200ms',
     textAlign: 'center',
+    borderRadius: 6,
     pointerEvents: 'auto'
   }
 
   $title = {
-    color: '#C43D2D',
-    fontWeight: 'bold',
-    margin: [-4, 20, 0]
+    color: '#222',
+    fontWeight: 500,
+    fontSize: 15,
+    margin: [0, 20]
   }
 
   $message = {
-    fontFamily: "Helvetica Nueue, Helvetica, Arial, sans-serif",
-  }
-
-  $close = {
-    position: 'absolute',
-    top: 3,
-    right: 3,
-    fontWeight: 'bold',
-    fontFamily: 'Helvetica',
-    fontSize: 10,
-    background: '#fff',
-    color: '#333',
-    borderRadius: 20,
-    width: 16,
-    height: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-    cursor: 'pointer'
+    fontFamily: "-apple-system, 'Helvetica Nueue', Helvetica, Arial, sans-serif",
   }
 }

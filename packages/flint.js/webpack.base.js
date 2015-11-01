@@ -29,17 +29,18 @@ module.exports = function(opts) {
 
   if (opts.minify)
     plugins.push(
-      new webpack.optimize.UglifyJsPlugin({
-        compress: { warnings: false }
-      })
+      new webpack.optimize.UglifyJsPlugin({ compress: { warnings: false } }),
+      new webpack.optimize.OccurenceOrderPlugin()
     )
 
   if (opts.dedupe)
     plugins.push(new webpack.optimize.DedupePlugin())
 
   function splitReact(name) {
-    plugins.push(new webpack.optimize.CommonsChunkPlugin('react', 'react.'+name+'.js'))
-    entry.react = ['react']
+    plugins.push(
+      new webpack.optimize.CommonsChunkPlugin('react', 'react.'+name+'.js')
+    )
+    entry.react = ['react', 'react-dom']
   }
 
   return {

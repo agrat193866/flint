@@ -19,6 +19,8 @@ const writeJSON = Promise.promisify(jf.writeFile)
 const readFile = Promise.promisify(fs.readFile)
 const writeFile = Promise.promisify(fs.writeFile)
 const touch = Promise.promisify(_touch)
+const copy = Promise.promisify(copyFile)
+const exists = Promise.promisify(fs.stat)
 
 const p = path.join
 const recreateDir = (dir) =>
@@ -36,6 +38,7 @@ export default {
   p,
   mkdir,
   rmdir,
+  copy,
   recreateDir,
   readdir,
   readJSON,
@@ -43,5 +46,6 @@ export default {
   readFile,
   writeFile,
   copyFile,
-  touch
+  touch,
+  exists
 }

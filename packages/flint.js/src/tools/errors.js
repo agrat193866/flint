@@ -1,5 +1,3 @@
-import unflint from '../lib/unflint'
-
 let browser;
 
 const browserData = data => {
@@ -7,11 +5,13 @@ const browserData = data => {
 }
 
 // this is for using in runview
-const flintRuntimeError = window.flintRuntimeError =
-  (message, file, line, col, error) => {
-    browserData({ message, file, line, col, stack: error.stack });
-    browser.emitter.emit('runtime:error')
-  }
+function flintRuntimeError(message, file, line, col, error) {
+  // console.log('got err', message, file, line, col, error)
+  browserData({ message, file, line, col, stack: error && error.stack });
+  browser.emitter.emit('runtime:error')
+}
+
+window.flintRuntimeError = flintRuntimeError
 
 export default function run(b, opts) {
   browser = b;
@@ -21,7 +21,6 @@ export default function run(b, opts) {
 }
 
 export function compileError(error) {
-  console.log('compile error', unflint(error.stack))
   if (error.loc) {
     const { message, fileName, loc, stack } = error;
     browserData({ message, stack, file: fileName, line: loc.line, col: loc.column });

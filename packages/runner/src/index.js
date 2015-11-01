@@ -1,20 +1,22 @@
 import compiler from './compiler'
-import react from './gulp/react'
-import babel from './gulp/babel'
-import bridge from './bridge/message'
+import babel from './lib/gulp-babel'
+import bridge from './bridge'
 import handleError from './lib/handleError'
+import build from './fbuild'
 import npm from './npm'
+import opts from './opts'
 import log from './lib/log'
 import cache from './cache'
 import unicodeToChar from './lib/unicodeToChar'
-import { p, mkdir, readdir, readJSON, writeJSON,
-  readFile, writeFile, recreateDir, copyFile } from './lib/fns'
+import openInBrowser from './lib/openInBrowser'
+import clear from './fbuild/clear'
+import keys from './keys'
+import { p, rmdir, readdir, readJSON, writeJSON, readFile } from './lib/fns'
+
+import flintTransform from 'flint-transform'
 import { Promise } from 'bluebird'
 import multipipe from 'multipipe'
 import portfinder from 'portfinder'
-import open from 'open'
-import editor from 'editor'
-import keypress from 'keypress'
 import path from 'path'
 import express from 'express'
 import cors from 'cors'
@@ -26,23 +28,29 @@ const $ = loadPlugins()
 
 Promise.longStackTraces()
 
-const proc = process // cache for keypress
 const newLine = "\n"
-const SCRIPTS_GLOB = [ '**/*.js', '!node_modules{,/**}', '!.flint{,/**}' ]
-const APP_DIR = path.normalize(process.cwd());
-const MODULES_DIR = p(__dirname, '..', 'node_modules');
-const APP_FLINT_DIR = p(APP_DIR, '.flint');
+const SCRIPTS_GLOB = [
+  '[Mm]ain.js', '**/*.{js,jsf}',
+  '!node_modules{,/**}',
+  '!.flint{,/**}'
+]
 
 let lastSavedTimestamp = {}
 let APP_VIEWS = {}
 let HAS_RUN_INITIAL_BUILD = false
-let OPTS, CONFIG, ACTIVE_PORT
+let OPTS, CONFIG
 
 gulp.task('build', buildScripts)
 
 // prompts for domain they want to use
 const firstRun = () =>
-  new Promise((res, rej) => {
+  new Promise(async (res, rej) => {
+    try {
+      CONFIG = await readJSON(OPTS.configFile)
+      log('got config', CONFIG)
+    }
+    catch(e) {}
+
     const hasRunBefore = OPTS.build || CONFIG
     log('first run hasRunBefore:', hasRunBefore)
 
@@ -51,30 +59,10 @@ const firstRun = () =>
 
     askForUrlPreference(useFriendly => {
       CONFIG = { friendlyUrl: OPTS.url, useFriendly: useFriendly }
-      openInBrowser()
       writeConfig(CONFIG)
       res(true)
     })
   })
-
-const clearBuildDir = () => {
-  return new Promise((res) => {
-    log('clearBuildDir')
-    recreateDir(p(APP_FLINT_DIR, 'build'))
-    .then(async () => {
-      log('clearBuildDir: make _ dir')
-      try {
-        await mkdir(p(APP_FLINT_DIR, 'build', '_'))
-        res()
-      } catch(e) {
-        console.error(e)
-      }
-    })
-  })
-}
-
-const clearOutDir = () =>
-  recreateDir(p(APP_FLINT_DIR, 'out'))
 
 /* FIRST BUILD STUFF */
 
@@ -91,17 +79,7 @@ const runAfterFirstBuilds = () =>
 
 /* END FIRST BUILD STUFF */
 
-function watchingMessage() {
-  listenForKeys()
-  console.log(
-    newLine +
-    ' • O'.green.bold + 'pen browser'.green + newLine +
-    ' • E'.green.bold + 'ditor'.green + newLine +
-    ' • I'.green.bold + 'nstall packages'.green + newLine +
-    ' • V'.green.bold + 'erbose logging'.green + newLine
-  )
-  resumeListenForKeys()
-}
+const userEditor = (process.env.VISUAL || process.env.EDITOR)
 
 function pipefn(fn) {
   return through.obj(function(file, enc, next) {
@@ -111,81 +89,66 @@ function pipefn(fn) {
 }
 const Z = pipefn()
 
-function cat(msg) {
-  return pipefn(() => msg && console.log(msg))
-}
-
-async function buildTemplate() {
-  const out = p(OPTS.buildDir, 'index.html')
-  const data = await readFile(p(APP_FLINT_DIR, 'index.html'), 'utf8')
-  let template = data
-    .replace('/static', '/_/static')
-    .replace('<!-- SCRIPTS -->', [
-      '<script src="/_/react.js"></script>',
-      '  <script src="/_/flint.js"></script>',
-      '  <script src="/_/packages.js"></script>',
-      '  <script src="/_/'+OPTS.name+'.js"></script>',
-      '  <script>window.Flint = flintRun_'+OPTS.name+'("_flintapp", { namespace:window, app:"userMain" });</script>'
-    ].join(newLine))
-
-  // TODO: flint build --isomorphic
-  if (OPTS.isomorphic) {
-    var Flint = require('flint-js/dist/flint.node');
-    var app = require(p(OPTS.buildDir, '_', OPTS.name));
-
-    var FlintApp = app(false, { Flint }, async function(output) {
-      template = template.replace(
-        '<div id="_flintapp"></div>',
-        '<div id="_flintapp">' + output + '</div>'
-      )
-
-      await writeFile(out, template)
-    })
-    return
+const watchDeletes = async vinyl => {
+  try {
+    if (vinyl.event == 'unlink') {
+      cache.remove(vinyl.path)
+      const name = path.relative(OPTS.outDir, vinyl.path)
+      await rmdir(p(OPTS.outDir, name))
+      bridge.message('file:delete', { name })
+    }
   }
-
-  await writeFile(out, template)
+  catch(e) { handleError(e) }
 }
 
-function buildFlint(cb) {
-  var read = p(MODULES_DIR, 'flint-js', 'dist', 'flint.prod.js');
-  var write = p(OPTS.buildDir, '_', 'flint.js');
-  copyFile(read, write, cb)
+const relative = file => path.relative(OPTS.appDir, file.path)
+let isWriting = false
+const startWrite = cb => { if (isWriting) return; isWriting = true; cb() }
+const endWrite = cb => { isWriting = false; cb() }
+const out = {
+  file: file => startWrite(() => process.stdout.write(` ⇢ ${relative(file)}\r`)),
+  badFile: (file, err) => endWrite(() => console.log(` ◆ ${relative(file)}`.red)),
+  goodFile: (file, ms) => endWrite(() => console.log(` ✓ ${relative(file)} - ${ms}ms`.bold))
 }
 
-function buildReact(cb) {
-  var read = p(MODULES_DIR, 'flint-js', 'dist', 'react.prod.js');
-  var write = p(OPTS.buildDir, '_', 'react.js');
-  copyFile(read, write, cb)
+const $p = {
+  flint: {
+    pre: () => compiler('pre'),
+    post: () => compiler('post')
+  },
+  babel: () => babel({
+    jsxPragma: 'view.el',
+    stage: 2,
+    blacklist: ['flow', 'es6.tailCall', 'strict'],
+    retainLines: true,
+    comments: true,
+    optional: ['bluebirdCoroutines'],
+    plugins: [flintTransform({ basePath: OPTS.dir })],
+    extra: {
+      production: process.env.production
+    }
+  }),
+  buildWrap: () => multipipe(
+    $.concat(`${OPTS.name}.js`),
+    $.wrap(
+      { src: `${__dirname}/../../templates/build.template.js` },
+      { name: OPTS.name },
+      { variable: 'data' }
+    )
+  )
 }
 
-function buildPackages(cb) {
-  var read = p(APP_FLINT_DIR, 'deps', 'packages.js')
-  var write = p(OPTS.buildDir, '_', 'packages.js')
-  copyFile(read, write, cb);
-}
+let writeWPort = socketPort =>
+  readConfig().then(config =>
+    writeConfig(Object.assign(config, { socketPort }))
+  )
 
-function buildAssets() {
-  gulp.src('.flint/static/**')
-    .pipe(gulp.dest(p(OPTS.buildDir, '_', 'static')))
-
-  var stream = gulp
-    .src(['*', '**/*', '!**/*.js', ], { dot: false })
-    .pipe(gulp.dest(p(OPTS.buildDir)));
-}
-
-const watchDeletes = vinyl => {
-  if (vinyl.event == 'unlink') {
-    cache.remove(vinyl.path)
-  }
-}
-
-function buildScripts(cb, stream) {
-  console.log("Building...".bold.white)
+export function buildScripts(cb, stream) {
+  console.log('Building...'.bold.white)
   log('build scripts')
-  let lastError, lastScript, curFile, buildingTimeout
-  let startTime = Date.now()
-  let dest = OPTS.buildDir ? p(OPTS.buildDir, '_') : OPTS.outDir || '.'
+  let startTime, lastScript, curFile, lastError
+  let outDest = OPTS.build ? p(OPTS.buildDir, '_') : OPTS.outDir || '.'
+  let internalDest = p(OPTS.flintDir, 'deps', 'internal')
 
   return (stream || gulp.src(SCRIPTS_GLOB))
     .pipe($.if(!OPTS.build,
@@ -200,100 +163,134 @@ function buildScripts(cb, stream) {
       startTime = Date.now()
       file.startTime = startTime
       // log
-      console.log(' ⇢ ', path.relative(APP_DIR, file.path))
+      out.file(file)
     }))
     .pipe($.plumber(error => {
       lastError = true
+      // add time
+      error.timestamp = Date.now()
+      // log
+      out.badFile(curFile)
       logError(error, curFile)
+      // send bridge
+      cache.addError(error.fileName, error)
       bridge.message('compile:error', { error })
+      // reset finished check
+      buildFinishedCheck(lastScript)
     }))
     .pipe(pipefn(file => {
       if (OPTS.build) return
-      let name = file.path.replace(APP_DIR, '')
+      let name = file.path.replace(OPTS.appDir, '')
       lastScript = { name, compiledAt: startTime }
       curFile = file
     }))
-    .pipe(compiler('pre'))
-    .pipe(babel({
-      stage: 2,
-      blacklist: ['flow', 'react', 'es6.tailCall'],
-      retainLines: true,
-      comments: true,
-      optional: ['bluebirdCoroutines']
-    }))
-    .pipe(compiler('post', {
-      dir: APP_FLINT_DIR,
-      onPackageStart: (name) => {
-        bridge.message('package:install', { name })
-      },
-      onPackageError: (name, error) => {
-        bridge.message('package:error', { name, error })
-      },
-      onPackageFinish: async (name) => {
-        if (OPTS.build) return
-        log('runner: onPackageFinish: ', name)
-        bridge.message('package:installed', { name })
-        updatePackages()
-      }
-    }))
+    .pipe($p.flint.pre())
+    .pipe($.sourcemaps.init())
+    .pipe($p.babel())
+    .pipe($p.flint.post())
     .pipe($.if(!stream,
       $.rename({ extname: '.js' })
     ))
-    .pipe(react({
-      stripTypes: true,
-      es6module: true
+    .pipe(pipefn(() => {
+      // for spaces when outputting
+      if (OPTS.build) console.log()
     }))
+    .pipe($.if(file => !OPTS.build && !file.isInternal,
+      $.sourcemaps.write('.')
+    ))
     .pipe($.if(OPTS.build,
+      $p.buildWrap()
+    ))
+    .pipe($.if(file => file.isInternal,
       multipipe(
-        $.concat(OPTS.name + '.js'),
-        $.wrap({ src: __dirname + '/../templates/build.template.js' }, { name: OPTS.name } , { variable: 'data' })
+        gulp.dest(internalDest),
+        $.ignore.exclude(true)
       )
     ))
-    .pipe($.if(function(file) {
-      if (stream) return false
-      if (lastError) return false
+    .pipe($.if(file => {
+      if (file.isInternal)
+        return false
 
-      const endTime = Date.now() - startTime;
+      file.isSourceMap = file.path.slice(file.path.length - 3, file.path.length) === 'map'
+
+      buildFinishedCheck(lastScript)
+
+      if (file.isSourceMap)
+        return true
+
+      if (stream || lastError)
+        return false
+
+      const endTime = Date.now() - startTime
+
+      out.goodFile(file, endTime)
       log('build took ', endTime, 'ms')
 
       const isNew = (
         !lastSavedTimestamp[file.path] ||
         file.startTime > lastSavedTimestamp[file.path]
       )
-      log('is new file', isNew)
 
+      log('is new file', isNew)
       if (isNew) {
         lastSavedTimestamp[file.path] = file.startTime
         return true
       }
+
       return false
-    },
-      gulp.dest(dest))
-    )
+    }, gulp.dest(outDest)))
     .pipe(pipefn(file => {
+      if (file.isSourceMap) return
+
       log('HAS_RUN_INITIAL_BUILD', HAS_RUN_INITIAL_BUILD)
       log('lastError', lastError)
 
       // after initial build
       if (HAS_RUN_INITIAL_BUILD) {
-        if (!lastError) {
-          bridge.message('script:add', lastScript);
-          bridge.message('compile:success', lastScript);
+        if (!lastError && !file.isInternal) {
+          cache.removeError(file.path)
+          bridge.message('script:add', lastScript)
+          bridge.message('compile:success', lastScript)
+
+          // fixed one error but have others
+          const prevError = cache.getLastError()
+          if (prevError)
+            bridge.message('compile:error', { error: prevError })
         }
-      }
-      // before initial build
-      else {
-        if (buildingTimeout) clearTimeout(buildingTimeout)
-        buildingTimeout = setTimeout(() => {
-          HAS_RUN_INITIAL_BUILD = true
-          runAfterFirstBuilds()
-        }, 450)
       }
     }))
     .pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn())
     .pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn())
     .pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn())
     .pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn()).pipe(pipefn())
+}
+
+export function buildWhileRunning() {
+  console.log("Building...")
+  return new Promise((res, rej) => {
+    gulp.src(['.flint/out/**/*.js'])
+      .pipe($.plumber(err => {
+        logError(err)
+        rej(err)
+      }))
+      .pipe($p.buildWrap())
+      .pipe(gulp.dest(p(OPTS.buildDir, '_')))
+      .pipe(pipefn(res))
+  });
+}
+
+let buildingTimeout
+function buildFinishedCheck(lastScript) {
+  if (!HAS_RUN_INITIAL_BUILD) {
+    log('buildFinishedCheck setTimeout')
+    if (buildingTimeout) clearTimeout(buildingTimeout)
+    buildingTimeout = setTimeout(() => {
+      log('HAS_RUN_INITIAL_BUILD = true')
+      HAS_RUN_INITIAL_BUILD = true
+
+      runAfterFirstBuilds()
+    }, 450)
+  }
 }
 
 function logError(error, file) {
@@ -301,101 +298,37 @@ function logError(error, file) {
     error.stack = unicodeToChar(error.stack || error.codeFrame);
 
   if (error.plugin == 'gulp-babel') {
-    console.log('JS error: %s: ', error.message.replace(APP_DIR, ''));
+    console.log(error.message.replace(OPTS.appDir, ''));
     if (error.name != 'TypeError' && error.loc)
-      console.log('  > line: %s, col: %s', error.loc.line, error.loc.column);
-    console.log(' Stack:', newLine, error.stack)
+      console.log('line: %s, col: %s', error.loc.line, error.loc.column);
+    console.log(newLine, error.stack.split("\n").splice(0, 7).join("\n"))
   }
   else {
     console.log('ERROR', "\n", error)
-    console.log('FILE', "\n", file.contents.toString())
+    console.log(error.stack)
+    log('FILE', "\n", file.contents.toString())
   }
 }
 
-function updatePackages() {
-  bridge.message('packages:reload', {})
-}
-
-function setOptions(opts, build) {
-  // from cli
-  OPTS = {}
-  OPTS.debug = opts.debug || opts.verbose
-  OPTS.port = opts.port
-  OPTS.host = opts.host
-  OPTS.watch = opts.watch
-
-  OPTS.build = build
-
-  OPTS.defaultPort = 4000
-  OPTS.dir = OPTS.dir || APP_DIR
-  OPTS.template = OPTS.template || '.flint/index.html'
-
-  OPTS.configFile = p(APP_FLINT_DIR, 'config')
-  OPTS.outDir = p(APP_FLINT_DIR, 'out')
-
-  OPTS.name = path.basename(process.cwd())
-
-  var folders = OPTS.dir.split('/')
-  OPTS.name = folders[folders.length - 1]
-  OPTS.url = OPTS.name + '.dev'
-
-  if (OPTS.build) {
-    OPTS.buildDir = OPTS.out ? p(OPTS.out) : p(APP_FLINT_DIR, 'build')
-  }
-}
+let readConfig = () => readJSON(OPTS.configFile)
 
 function writeConfig(config) {
-  writeJSON(OPTS.configFile, config)
+  writeJSON(OPTS.configFile, config, { spaces: 2 })
 }
 
-function listenForKeys() {
-  keypress(proc.stdin)
-
-  // listen for the "keypress" event
-  proc.stdin.on('keypress', async function (ch, key) {
-    if (!key) return
-
-    switch(key.name) {
-      case 'o': // open browser
-        openInBrowser(true)
-        break
-      case 'e': // open editor
-        editor('.')
-        break
-      case 'i': // install npm
-        console.log("Installing npm packages...".white.bold)
-        await npm.bundle()
-        updatePackages()
-        console.log('Packages updated!'.green.bold)
-        break
-      case 'v': // verbose logging
-        OPTS.verbose = !OPTS.verbose
-        setLogging(OPTS)
-        console.log(OPTS.verbose ? 'Set to log verbosely'.yellow : 'Set to log quietly'.yellow, newLine)
-        break
-    }
-
-    // exit
-    if (key.ctrl && key.name == 'c')
-      process.exit()
-  });
-
-  resumeListenForKeys()
-}
-
-function openInBrowser(force) {
-  if (OPTS.debug && !force) return
-  if (CONFIG.useFriendly) {
-    open('http://' + CONFIG.friendlyUrl);
-  } else {
-    open('http://localhost:' + ACTIVE_PORT);
-  }
-}
-
-function resumeListenForKeys() {
-  // listen for keys
-  proc.stdin.setRawMode(true);
-  proc.stdin.resume();
+function watchingMessage() {
+  keys.start()
+  console.log(
+    newLine +
+    ' • O'.cyan.bold + 'pen        '.cyan +
+      ' • V'.cyan.bold + 'erbose'.cyan + newLine +
+    (userEditor
+      ? (' • E'.cyan.bold + 'dit        '.cyan)
+      : '               ') +
+        ' • I'.cyan.bold + 'nstall (npm)'.cyan + newLine
+    // ' • U'.blue.bold + 'pload'.blue + newLine
+  )
+  keys.resume()
 }
 
 // ask for preferred url and set /etc/hosts
@@ -417,18 +350,23 @@ function getScriptTags(files, req) {
       '<script src="/__/react.dev.js"></script>',
       '<script src="/__/flint.dev.js"></script>',
       '<script src="/__/packages.js" id="__flintPackages"></script>',
+      '<script src="/__/internals.js" id="__flintInternals"></script>',
       '<script>_FLINT_WEBSOCKET_PORT = ' + wport() + '</script>',
       '<script src="/__/devtools.dev.js"></script>',
       // devtools
       devToolsDisabled(req) ? '' : [
-        '<script src="/__/tools.js"></script>',
+        '<script src="/__/tools/packages.js"></script>',
+        '<script src="/__/tools/internals.js"></script>',
+        '<script src="/__/tools/tools.js"></script>',
         '<script>flintRun_tools("_flintdevtools", { app: "devTools" });</script>'
       ].join(newLine),
       // user files
-      '<script>window.Flint = runFlint(window.renderToID || "_flintapp", { namespace: window, app: "userMain" });</script>',
+      `<script>window.Flint = runFlint(window.renderToID || "_flintapp", { app: "${OPTS.name}" });</script>`,
+      newLine,
+      '<!-- APP -->',
       assetScriptTags(files),
-      '<script>Flint.render()</script>',
-      '<!-- END FLINT JS -->'
+      '<script>Flint.init()</script>',
+      '<!-- END APP -->'
     ].join(newLine)
 }
 
@@ -451,11 +389,15 @@ function runServer() {
       next();
     })
 
+    const staticOpts =  {
+      redirect: false
+    }
+
     // USER files
     // user js files at '/_/filename.js'
     server.use('/_', express.static('.flint/out'));
     // user non-js files
-    server.use('/', express.static('.'));
+    server.use('/', express.static('.', staticOpts));
     // user static files...
     server.use('/_/static', express.static('.flint/static'));
 
@@ -463,14 +405,14 @@ function runServer() {
     // packages.js
     server.use('/__', express.static('.flint/deps'));
     // tools.js
-    server.use('/__', express.static(p(MODULES_DIR, 'flint-tools', 'build', '_')));
+    server.use('/__/tools', express.static(p(OPTS.modulesDir, 'flint-tools', 'build', '_')));
     // flint.js & react.js
-    server.use('/__', express.static(p(MODULES_DIR, 'flint-js', 'dist')));
+    server.use('/__', express.static(p(OPTS.modulesDir, 'flint-js', 'dist')));
 
     server.get('*', function(req, res) {
       runAfterFirstBuildComplete(function() {
         makeTemplate(req, function(template) {
-          res.send(template.replace('/static', '/_/static'));
+          res.send(template.replace(/\/static/g, '/_/static'));
         })
       })
 
@@ -489,7 +431,7 @@ function runServer() {
         host + (port && port !== 80 ? ':' + port : '')
       );
 
-      ACTIVE_PORT = port
+      opts.set('port', port)
       res();
       server.listen(port, host);
     }
@@ -504,7 +446,9 @@ function runServer() {
       // if no specified port, find open one
       if (!OPTS.port) {
         portfinder.basePort = port;
-        portfinder.getPort({ host: 'localhost' }, handleError(serverListen) );
+        portfinder.getPort({ host: 'localhost' },
+          handleError(serverListen)
+        );
       }
       else {
         serverListen(port);
@@ -523,19 +467,25 @@ Array.prototype.move = function(from, to) {
 async function makeTemplate(req, cb) {
   const templatePath = p(OPTS.dir, OPTS.template)
   const template = await readFile(templatePath)
-  const dir = await readdir({ root: p(APP_FLINT_DIR, 'out') })
-  const files = dir.files
+  const dir = await readdir({ root: p(OPTS.flintDir, 'out') })
+  const files = dir.files.filter(f => /\.jsf?$/.test(f.name)) // filter sourcemaps
+  const hasFiles = files.length
 
-  if (!files.length) {
-    console.log('no flint files')
-    return cb(template.toString())
+  let paths = []
+
+  if (hasFiles) {
+    paths = files.map(file => file.path)
+
+    let mainIndex = 0
+
+    paths.forEach((p, i) => {
+      if (/[Mm]ain\.jsf?$/.test(p))
+        mainIndex = i
+    })
+
+    if (mainIndex !== -1)
+      paths.move(mainIndex, 0)
   }
-
-  let paths = files.map(file => file.path)
-  const mainIndex = paths.indexOf('main.js')
-
-  if (mainIndex !== -1)
-    paths.move(mainIndex, 0)
 
   const fullTemplate = template.toString().replace('<!-- SCRIPTS -->',
     '<div id="_flintdevtools"></div>'
@@ -543,44 +493,31 @@ async function makeTemplate(req, cb) {
     + getScriptTags(paths, req)
   )
 
+
   cb(fullTemplate)
 }
 
 function wport() {
-  return 2283 + parseInt(ACTIVE_PORT, 10)
+  return 2283 + parseInt(opts.get('port'), 10)
 }
 
 function setLogging(opts) {
   log.debug = opts.debug || opts.verbose
 }
 
-async function build() {
-  log('0')
-  buildFlint()
-  log('0')
-  buildReact()
-  log('0')
-  buildPackages()
-  log('0')
-  buildAssets()
-  log('0')
-  buildScripts()
-  log('0')
-  await afterFirstBuild()
-  log('0')
-  buildTemplate()
-}
-
-export async function run(opts, isBuild) {
+export async function run(_opts, isBuild) {
   try {
-    setOptions(opts, isBuild)
+    const appDir = path.normalize(process.cwd());
+    OPTS = opts.set({ ..._opts, appDir, isBuild })
+
     setLogging(OPTS)
     log('run', OPTS)
-    compiler('init', { dir: APP_FLINT_DIR })
-    await npm.init({ dir: APP_FLINT_DIR })
-    CONFIG = await readJSON(OPTS.configFile)
-    log('got config', CONFIG)
-    const isFirstRun = await firstRun()
+
+    npm.init(OPTS)
+    cache.setBaseDir(OPTS.dir)
+    compiler('init', OPTS)
+
+    await firstRun()
 
     if (OPTS.build) {
       console.log(
@@ -590,12 +527,9 @@ export async function run(opts, isBuild) {
       )
 
       log('building...')
-      await clearBuildDir()
-      build()
-      await* [
-        npm.install(),
-        afterFirstBuild()
-      ]
+      await clear.buildDir()
+      await build(false, afterFirstBuild)
+      await npm.install()
 
       console.log(
         "\nBuild Complete! Check your .flint/build directory\n".green.bold
@@ -608,16 +542,19 @@ export async function run(opts, isBuild) {
     }
     else {
       log('running...')
-      await clearOutDir()
+      await clear.outDir()
       await runServer()
       bridge.start(wport())
+      writeWPort(wport())
       buildScripts()
       await afterFirstBuild()
+      await npm.install()
       openInBrowser()
       watchingMessage()
     }
   }
   catch(e) {
-    console.error(e)
+    if (!e.silent)
+      handleError(e)
   }
 }

@@ -3,24 +3,13 @@ require("shelljs/global");
 var path = require("path");
 var fs   = require("fs");
 
-exec('git submodule update --init')
-
-// setup flint-babel
-cd('vendor/babel');
-exec('make bootstrap')
-cd('../..')
-
-// setup flint-react-tools
-cd('vendor/react-tools')
-exec('npm install')
-exec('npm link')
-cd('../..')
+exec("npm install --loglevel=error")
 
 // get packages
 var packages = [];
 
 // order important so they are linkable to each other
-var packageNames = ['flint.js', 'runner', 'cli'];
+var packageNames = ['transform', 'flint.js', 'runner', 'cli'];
 
 packageNames.forEach(function (loc) {
   var name = path.basename(loc);
@@ -45,7 +34,7 @@ packageNames.forEach(function (loc) {
 // link in apps first
 ['tools'].forEach(function(app) {
   cd("apps/" + app + "/.flint")
-  exec("npm install")
+  exec("npm install --loglevel=error")
   exec("npm link")
   cd("../../..")
 })
@@ -57,6 +46,7 @@ packages.forEach(function (pkg) {
   var nodeModulesLoc = "packages/" + pkg.folder + "/node_modules";
   mkdir("-p", nodeModulesLoc);
 
+  // link them out
   packages.forEach(function (sub) {
     if (!pkg.pkg.dependencies || !pkg.pkg.dependencies[sub.name]) return;
 
@@ -67,8 +57,9 @@ packages.forEach(function (pkg) {
   });
 
   cd("packages/" + pkg.folder)
-  exec("npm install")
+  exec("npm install --loglevel=error")
 
+  // link them in
   pkg.links.forEach(function(link) {
     console.log('LINKING IN ', link)
     exec("npm link " + link)
@@ -79,5 +70,4 @@ packages.forEach(function (pkg) {
   cd("../..");
 });
 
-exec("make build")
 console.log("Done bootstrapping!")

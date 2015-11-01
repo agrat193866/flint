@@ -1,8 +1,7 @@
 {
   "name": "flint",
-  "version": "0.2.46",
+  "version": "1.3.38",
   "description": "An amazing way to build apps with React",
-  "main": "bin/flint",
   "repository": {
     "type": "git",
     "url": "git://github.com/flint-lang/flint.git"
@@ -19,19 +18,20 @@
     "clui": "^0.3.1",
     "colors": "^1.0.3",
     "commander": "^2.6.0",
-    "es6-promise": "^2.0.1",
-    "flint-runner": "^0.2.0",
+    "es6-promise": "^3.0.2",
+    "flint-runner": "^1.3.2",
     "mkdirp": "^0.5.0",
-    "ncp": "^1.0.1",
+    "ncp": "^2.0.0",
     "node-fetch": "^1.3.2",
+    "raven": "^0.8.1",
     "reapp-object-assign": "^1.0.0",
     "replace": "^0.3.0",
     "rimraf": "^2.2.8"
   },
   "bin": {
-    "flint": "./lib/bin/flint.js",
-    "flint-new": "./lib/bin/flint-new.js",
-    "flint-run": "./lib/bin/flint-run.js",
-    "flint-build": "./lib/bin/flint-build.js"
+    "flint": "./entry/flint",
+    "flint-new": "./entry/flint-new",
+    "flint-run": "./entry/flint-run",
+    "flint-build": "./entry/flint-build"
   }
 }

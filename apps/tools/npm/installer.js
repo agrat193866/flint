@@ -21,6 +21,7 @@ view Installer {
     state = 3
     name = tools.data.name
     error = tools.data.error
+    setTimeout(() => state = 0, 2000)
   })
 
   tools.on('package:select', () => {
@@ -39,22 +40,19 @@ view Installer {
 
   const title = state => {
     switch(state) {
-      case 1: return `Installing ${name}${version ? ' ' + version : ''}...`; break
-      case 2: return `Installed ${name}!`; break
-      case 3: return `Error: ${name}`; break
-      case 4: return `Select version`; break
+      case 1: return `Installing ${name}${version ? ' ' + version : ''}...`
+      case 2: return `Installed ${name}!`
+      case 3: return `Error: ${name}`
+      case 4: return `Select version`
     }
   }
 
   const body = state => {
     switch(state) {
-      case 1: return null; break
-      case 2: return null; break
-      case 3: return error; break
-      case 4: return <Versions
-        versions={versions}
-        onSelect={selectVersion}
-      />; break
+      case 1: return null
+      case 2: return null
+      case 3: return error
+      case 4: return <Versions versions={versions} onSelect={selectVersion} />
     }
   }
 
@@ -67,32 +65,8 @@ view Installer {
   </Modal>
 }
 
-view InstallerLoading {
-  <svg viewBox="0 14 32 18" width="32" height="4" fill="#f20" preserveAspectRatio="none">
-    <path class="first" opacity="0.8" transform="translate(0 0)" d="M2 14 V18 H6 V14z">
-      <animateTransform attributeName="transform" type="translate" values="0 0; 24 0; 0 0" dur="2s" begin="0" repeatCount="indefinite" keySplines="0.2 0.2 0.4 0.8;0.2 0.2 0.4 0.8" calcMode="spline" />
-    </path>
-    <path class="second" opacity="0.5" transform="translate(0 0)" d="M0 14 V18 H8 V14z">
-      <animateTransform attributeName="transform" type="translate" values="0 0; 24 0; 0 0" dur="2s" begin="0.1s" repeatCount="indefinite" keySplines="0.2 0.2 0.4 0.8;0.2 0.2 0.4 0.8" calcMode="spline" />
-    </path>
-    <path class="third" opacity="0.25" transform="translate(0 0)" d="M0 14 V18 H8 V14z">
-      <animateTransform attributeName="transform" type="translate" values="0 0; 24 0; 0 0" dur="2s" begin="0.2s" repeatCount="indefinite" keySplines="0.2 0.2 0.4 0.8;0.2 0.2 0.4 0.8" calcMode="spline" />
-    </path>
-  </svg>
-
-  $svg = {
-    position: 'absolute',
-    bottom: 0,
-    right: '50%',
-    marginRight: -50,
-    width: 100,
-    height: 17,
-    marginBottom: -15
-  }
-}
-
 view Versions {
-  <version repeat={^versions} onClick={() => ^onSelect(_)}>
+  <version repeat={view.props.versions} onClick={() => view.props.onSelect(_)}>
     <inner>
       <v key={'v' + _index}>{_.version}</v>
       <info>{_.description}</info>

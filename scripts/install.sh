@@ -12,8 +12,8 @@ do_install () {
 
 echo
 
-USER=$(whoami)
 NODE_MODULES=$(npm root -g)
+NODE_MODULES_BIN=$(npm bin -g)
 
 # This was breaking `read` :(
 # set -e
@@ -83,12 +83,12 @@ EOF
 fi
 
 # Check sudo privelege on global node_modules
-if [ -w "$NODE_MODULES" ]; then
+if [ -w "$NODE_MODULES" ] && [ -w "$NODE_MODULES_BIN" ]; then
   echo_good "Checking global node_modules permissions... ✓"
   echo
   echo "Installing Flint..."
   echo
-  npm install -g flint
+  npm install -g flint --loglevel=error
 else
   #
 cat <<"EOF"
@@ -96,7 +96,7 @@ cat <<"EOF"
   Your global npm modules are owned by sudo!
 
   This will cause Flint to create new apps more slowly
-  (and it won't work offline).
+  (and forces you to use sudo when installing npm globally).
 
 EOF
   echo
@@ -105,9 +105,9 @@ EOF
 
   # if wanted to fix
   if [[ "$reply" =~ ^[Yy]$ ]]; then
-    sudo chown -R $USER ~/.npm
-    sudo chown -R $USER $NODE_MODULES
-    sudo chmod ug+w $NODE_MODULES
+    sudo chown -R $(whoami) ~/.npm
+    sudo chown -R $(whoami) $NODE_MODULES
+    sudo chown -R $(whoami) $NODE_MODULES_BIN
 
     # if fixed
     if [ -w $NODE_MODULES ]; then
@@ -116,7 +116,7 @@ EOF
       echo
       echo "Installing flint..."
       echo
-      npm install -g flint
+      npm install -g flint --loglevel=error
     else
       echo
       echo_bad "Uh oh! Couldn't fix permissions!"
@@ -144,7 +144,7 @@ EOF
     echo
     echo "Installing flint with sudo..."
     echo
-    sudo npm install -g flint
+    sudo npm install -g flint --loglevel=error
   fi
 fi
 
@@ -152,21 +152,9 @@ if hash flint 2>/dev/null; then
   echo
   if [ -z "$EDITOR" ]; then
     echo_bold "No EDITOR set in your shell"
-    echo "If you'd like, Flint lets you open your editor after starting"
+    echo "Flint helps open your editor if you set your EDITOR shell variable"
   else
     echo_bold "Your default editor is set to $EDITOR"
-    echo "Would you like to change your default editor?"
-  fi
-
-  # enter editor
-  echo "Example editor commands: atom, subl, vim"
-  read -p "Enter new editor command (or just press enter to skip): " reply
-  echo
-
-  # if wanted to fix
-  if [[ "$reply" =~ ^[a-z]+$ ]]; then
-    EDITOR=$reply; export EDITOR
-    echo "Editor changed to $EDITOR!"
   fi
 
   echo

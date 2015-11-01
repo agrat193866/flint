@@ -4,22 +4,40 @@ const propsMatch = /view\.props\./g
 const propsReplace = String.fromCharCode('94')
 
 const niceRuntimeError = err => {
+  if (err.file)
+    err.file = err.file
+      .replace(new RegExp('.*' + window.location.origin + '(\/\_\/)?'), '')
+
   err.niceMessage = err.message
     .replace(/Uncaught .*Error:\s*/, '')
     .replace(propsMatch, propsReplace)
   return err
 }
 
+const niceNpmError = ({ msg, name }) => {
+  msg = msg
+    .replace(/(npm WARN.*\n|ERR\!)/g, '')
+    .replace(/npm  argv.*\n/g, '')
+    .replace(/npm  node v.*\n/g, '')
+    .replace(/npm  npm.*\n/g, '')
+    .replace(/npm  code.*\n/g, '')
+    .replace(/npm  peerinvalid /g, '')
+    .replace(/npm  404 /g, '')
+  return { msg, name }
+}
+
 const niceCompilerError = err =>
   niceCompilerMessage(niceStack(err))
 
-const replaceCompilerMsg = (msg, filename = '') =>
+const replaceCompilerMsg = (msg) =>
   msg
-    .replace(filename + ': ', '')
+    .replace(/.*\.js\:/, '')
     .replace(/identifier ([a-z]*)\s*Unknown global name/, '$' + '1 is not defined')
     .replace(/\([0-9]+\:[0-9]+\)/, '')
     .replace(/Line [0-9]+\:\s*/, '')
     .replace(/Flint.([A-Za-z1-9_]*)Wrapper/, '$' + '1')
+    .replace('view.render = () => ', '')
+    .replace(' view={view}', '')
 
 const niceCompilerMessage = err => {
   err.niceMessage = replaceCompilerMsg(err.message, err.fileName)
@@ -40,12 +58,13 @@ const niceStack = err => {
           replacedChars += (matches.length * 10) // * len of replacement
         }
 
+        // remove the babel " > |" before the line
         result = result
-          .replace(/\>\s*[0-9]+\s*\|\s*/g, '')
+          .replace(/\>\s*[0-9]+\s*\|\s*/, '')
 
         result = replaceCompilerMsg(result)
 
-        const colIndex = err.loc.column - 1
+        const colIndex = err.loc.column - 4 // 4 because we remove babel prefix
         const afterUnflintIndex = colIndex - replacedChars
         err.niceStack = split(result, afterUnflintIndex)
       }
@@ -55,47 +74,53 @@ const niceStack = err => {
 }
 
 view Errors {
+  view.pause()
+
   let error = null
   let compileError = null
   let runtimeError = null
-  let errDelay = null
+  let npmError = null
 
   /* only set error if there is an error,
      giving compile priority */
-  const setError = () => {
-    clearTimeout(errDelay)
-    const noErrors = !compileError && !runtimeError
-
-    if (noErrors) {
+  function setError() {
+    if (compileError)
+      error = niceCompilerError(compileError)
+    else if (runtimeError)
+      error = niceRuntimeError(runtimeError)
+    else {
       error = null
-      return
     }
 
-    const delay = compileError ? 200 : 800
-    errDelay = setTimeout(() => {
-      if (runtimeError) {
-        error = niceRuntimeError(runtimeError)
-      }
-      if (compileError) {
-        error = niceCompilerError(compileError)
-      }
-    }, delay)
+    view.update()
+  }
+
+  function close() {
+    error = null
+    compileError = null
+    runtimeError = null
+    npmError = null
+    view.update()
   }
 
   tools.on('compile:error', () => {
-    runtimeError = null
     compileError = tools.data.error
     setError()
   })
 
   tools.on('runtime:error', () => {
-    if (runtimeError) return // prefer first error
-    compileError = null
+    // if (runtimeError) return // prefer first error
     runtimeError = tools.data
     setError()
   })
 
+  tools.on('npm:error', () => {
+    npmError = niceNpmError(tools.data.error)
+    view.update()
+  })
+
   tools.on('runtime:success', () => {
+    compileError = null
     runtimeError = null
     setError()
   })
@@ -107,122 +132,126 @@ view Errors {
 
   <ErrorMessage
     error={error}
-    runtime={runtimeError}
-    compile={compileError}
+    npmError={npmError}
+    close={close}
   />
-
-  $div = {
-    position: 'absolute',
-    top: 0, left: 0,
-    width: '100%'
-  }
 }
 
-view ErrorMessage {
-  const last = arr => arr[arr.length - 1]
-  const fileName = url => url && last(url.split('/'))
-  const getLine = err => err && (err.line || err.loc && err.loc.line)
-  const devHeight = 0 // 34 with bar
-  const closedHeight = 55
-  const openHeight = 200
+const flintAddedLines = 1
+const last = arr => arr[arr.length - 1]
+const fileName = url => url && url.replace(/[\?\)].*/, '')
+const getLine = err => err && (err.line || err.loc && err.loc.line)
 
-  let open = false
-  let line = getLine(^error)
+view ErrorMessage {
+  let line = getLine(view.props.error)
 
   on('props', () => {
-    line = getLine(^error)
+    line = getLine(view.props.error)
   })
 
-  <inner if={^error}>
-    <where>
-      {fileName(^error.file || ^error.fileName)}
-      {line ? ` line ${line}` : ''}
-    </where>
-    {' '}
-    <errorTitle>
-      {^error.niceMessage || ^error.message}
-      {^error.niceStack &&
-        <niceStack>
-          {^error.niceStack[0]}
-          <errCol>{^error.niceStack[1]}</errCol>
-          {^error.niceStack[2]}
-        </niceStack>
-      }
-    </errorTitle>
-  </inner>
+  function showFlintErrorDiv() {
+    setTimeout(() => {
+      const errorDiv = document.getElementById('FLINTERROR')
+      if (errorDiv)
+        errorDiv.className = 'active'
+    },1)
+  }
 
-  const red = '#C51E19'
+  <Debounce force={!view.props.error} onUpdate={showFlintErrorDiv}>
+    <bar>
+      <Close onClick={view.props.close} size={40} />
+      <inner if={view.props.npmError}>
+        <where><b>{view.props.npmError.name}</b></where> {view.props.npmError.msg}
+      </inner>
+      <inner if={view.props.error}>
+        <where>
+          In <b>{fileName(view.props.error.file)}</b>
+          <line if={line}>
+            <span>&nbsp;line</span> <b>{line - flintAddedLines}</b>
+          </line>
+        </where>
+        {' '}
+        <errorTitle>
+          {(view.props.error.niceMessage || view.props.error.message).trim()}
+          <niceStack if={view.props.error.niceStack}>
+            {view.props.error.niceStack[0]}
+            <errCol>{view.props.error.niceStack[1]}</errCol>
+            {view.props.error.niceStack[2]}
+          </niceStack>
+        </errorTitle>
+      </inner>
+    </bar>
+  </Debounce>
 
-  $ = {
-    background: '#fff',
-    borderTop: '1px solid #ccc',
-    borderBottom: '4px solid ' + red,
+  const red = '#cd423e'
+
+  $bar = {
+    dispay: 'block',
+    background: red,
     position: 'fixed',
     left: 0,
-    height: open ? openHeight : 'auto',
-    bottom: (^error) ? devHeight : (devHeight - closedHeight),
-    transition: 'all 300ms ease-in',
+    bottom: view.props.error ? 0 : -100,
+    transition: 'all 200ms ease-in',
     right: 0,
-    fontFamily: 'helvetica',
-    color: '#222',
-    fontSize: 15,
-    padding: 8,
+    fontFamily: '-apple-system, "San Francisco", Roboto, "Segou UI", "Helvetica Neue", Helvetica, Arial, sans-serif',
+    fontWeight: 300,
+    color: '#fff',
+    fontSize: '14px',
+    padding: 10,
     pointerEvents: 'all',
     overflow: 'scroll',
     zIndex: 2147483647,
-    boxShadow: '0 -6px 12px rgba(0,0,0,0.06)'
+    boxShadow: '0 -6px 12px rgba(0,0,0,0.06)',
   }
 
   $inner = {
     display: 'block',
+    // leave space for close button
+    width: '98%',
   }
 
   $where = {
     display: 'inline-block',
-    fontSize: 15,
     pointerEvents: 'all',
-    fontWeight: 'bold',
-    color: red
+    fontWeight: 300,
+    color: 'rgba(255,255,255,0.8)',
+  }
+
+  $line = {
+    display: 'inline-block',
+    whiteSpace: 'pre',
+    pointerEvents: 'all'
+  }
+
+  $b = {
+    color: '#fff'
   }
 
   $errorTitle = {
-    display: 'inline'
-  }
-
-  $msg = {
-    display: 'inline-block',
-    fontSize: 16,
-    fontWeight: 'bold',
-    pointerEvents: 'all',
+    display: 'inline',
+    color: 'rgba(255,255,255,0.7)'
   }
 
   $niceStack = {
-    opacity: 0.65,
+    color: 'rgba(255,255,255,0.85)',
     display: 'inline',
     fontFamily: 'Meslo, Menlo, Monaco, monospace',
-    fontSize: 14,
     padding: [0, 5]
   }
 
   $errCol = {
     display: 'inline',
-    background: 'red',
-    borderBottom: '2px solid red',
-    marginBottom: -2,
-    color: 'white'
+    borderBottom: '2px solid #f5d64c',
+    margin: -3,
+    padding: 3,
+    color: '#fff'
   }
 
   $stack = {
     fontFamily: 'monospace',
-    fontSize: 14,
     fontWeight: 'bold',
     whiteSpace: 'nowrap',
     maxHeight: 200
-  }
-
-  $line = {
-    whiteSpace: 'pre',
-    pointerEvents: 'all'
   }
 
   $boldline = {

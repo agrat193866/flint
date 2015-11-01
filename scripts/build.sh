@@ -10,19 +10,25 @@ for f in packages/*; do
   # webpack packages
   if [ -f "$f/webpack.config.js" ]; then
     cd $f
-    for file in webpack.config*; do
-      node node_modules/webpack/bin/webpack --config $file $1 &
-      echo "running webpack for config $file"
-    done
+    node node_modules/webpack/bin/webpack --config webpack.config.js $1 &
+    echo "running $f webpack for $file"
     cd ../..
   # or just babel
   elif [ -d "$f/src" ]; then
     echo "running babel on $f"
-    node node_modules/babel/bin/babel "$f/src" --out-dir "$f/lib" \
+
+    node node_modules/babel/bin/babel "$f/src" --out-dir "$f/lib/compat" \
       --stage 0 \
       --loose all \
       --blacklist es6.tailCall \
       --optional runtime \
+      --copy-files $1 &
+
+    node node_modules/babel/bin/babel "$f/src" --out-dir "$f/lib/modern" \
+      --stage 0 \
+      --loose all \
+      --optional asyncToGenerator \
+      --blacklist es6.tailCall \
       --copy-files $1 &
   fi
 done
@@ -41,11 +47,12 @@ if [ $1="--watch" ]; then
     if [ -d 'lib' ]; then
       chsum2=`find lib -type f -exec md5 {} \;`
       if [[ $chsum1 != $chsum2 ]] ; then
-        npm link
+        npm link --loglevel=error
         chsum1=$chsum2
 
         # watch tools after first build
         if [ $hasLinkedOnce == 'false' ]; then
+          sleep 2 # todo: wait for webpack finish
           cd ../..
           cd apps/tools
           flint build --watch &

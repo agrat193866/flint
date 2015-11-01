@@ -1,398 +1,335 @@
-import 'reapp-object-assign'
+import hashsum from 'hash-sum'
 import ee from 'event-emitter'
-import resolveStyles from 'flint-radium/lib/resolve-styles'
 import React from 'react'
-import ReactDOM from 'react-dom'
 import raf from 'raf'
-import equal from 'deep-equal'
+import ReactDOM from 'react-dom'
 import clone from 'clone'
 import Bluebird, { Promise } from 'bluebird'
 
-import './lib/setRoot'
-import './lib/shimFlintMap'
-import arrayDiff from './lib/arrayDiff'
-import on from './lib/on'
-import createElement from './tag/createElement'
-import Wrapper from './views/Wrapper'
-import ErrorDefinedTwice from './views/ErrorDefinedTwice'
-import mainComponent from './lib/mainComponent'
+import 'reapp-object-assign'
+import './shim/root'
+import './shim/flintMap'
+import './shim/on'
+import './shim/partial'
+import './lib/bluebirdErrorHandle'
+import createComponent from './createComponent'
+import range from './lib/range'
+import iff from './lib/iff'
+import router from './lib/router'
+import assignToGlobal from './lib/assignToGlobal'
+import safeRun from './lib/safeRun'
 import reportError from './lib/reportError'
+import arrayDiff from './lib/arrayDiff'
+import createElement from './tag/createElement'
+import ErrorDefinedTwice from './views/ErrorDefinedTwice'
+import NotFound from './views/NotFound'
+import Main from './views/Main'
+
+/*
+
+  Welcome to Flint!
+
+    This file deals mostly with setting up Flint,
+    loading views and files, rendering,
+    and exposing the public Flint functions
+
+*/
 
 Promise.longStackTraces()
 
 // GLOBALS
+root._history = history // for imported modules to use
 root._bluebird = Bluebird // for imported modules to use
+root.Promise = Promise // for modules to use
+root.ReactDOM = ReactDOM
 root.on = on
-root.Promise = Promise
 root.module = {}
-root.fetchJSON = (...args) => fetch(...args).then(res => res.json())
-root.onerror = reportError
-root.view = { update: () => {} } // shim view
+root.fetch.json = (...args) => fetch(...args).then(res => res.json())
 
 const uuid = () => Math.floor(Math.random() * 1000000)
-const runEvents = (queue, name) =>
-  queue && queue[name].length && queue[name].forEach(e => e())
-const safeRun = fn => {
-  if (process.env.production) fn()
-  else {
-    try { fn() }
-    catch(e) {
-      console.error(e)
-      const { name, message, stack } = e
-      reportError({ name, message, stack })
-    }
-  }
-}
 
-function run(browserNode, userOpts, afterRenderCb) {
+export default function run(browserNode, userOpts, afterRenderCb) {
   const opts = Object.assign({
     namespace: {},
     entry: 'Main'
   }, userOpts)
 
-  // either on window or namespace
-  if (opts.namespace !== root && opts.app)
-    root[opts.app] = opts.namespace
+  const Tools = root._DT
 
-  let firstRun = false
-  const render = () => {
-    const run = () => {
-      const MainComponent = getComponent('Main') || mainComponent;
+  // error handling
+  const flintOnError = (...args) => {
+    reportError(...args)
 
-      if (!browserNode) {
-        Flint.renderedToString = React.renderToString(<MainComponent />)
-        afterRenderCb && afterRenderCb(Flint.renderedToString)
-      }
-      else {
-        ReactDOM.render(<MainComponent />, document.getElementById(browserNode))
-      }
+    // restore last working views
+    Object.keys(Flint.views).forEach(name => {
+      Flint.views[name] = Internal.lastWorkingViews[name]
+    })
+  }
 
-      firstRun = false
-      emitter.emit('afterRender')
-    }
+  root.onerror = flintOnError
 
-    if (Flint.preloaders.length) {
-      const preloaders = Flint.preloaders.map(loader => loader())
-      Promise.all(preloaders).then(run)
-    }
-    else {
-      run()
+  const Internal = root._Flint = {
+    isRendering: 0,
+    firstRender: true,
+    isDevTools: opts.app == 'devTools',
+
+    viewCache: {}, // map of views in various files
+    viewsInFile: {}, // current build up of running hot insertion
+    currentFileViews: null, // tracks views as file loads, for hot reloading
+    currentHotFile: null, // current file that is running
+    getCache: {}, // stores { path: { name: val } } for use in view.get()
+    getCacheInit: {}, // stores the vars after a view is first run
+    propsHashes: {},
+
+    changedViews: [],
+    mountedViews: {},
+    lastWorkingViews: {},
+    lastWorkingRenders: {},
+    preloaders: [], // async functions needed before loading app
+
+    // devtools
+    inspector: {},
+    viewsAtPath: {},
+
+    setCache(path, name, val) {
+      Internal.getCache[path][name] = val
+      // when devtools inspecting
+      setInspector(path)
     }
   }
 
-  // exported tracks previous exports so we can overwrite
-  let exported = {}
-  const assignToGlobal = (name, val) => {
-    if (!exported[name] && typeof root[name] != 'undefined')
-      throw `You're attempting to define a global that is already defined:
-          ${name} = ${JSON.stringify(root[name])}`
-
-    exported[name] = true
-    root[name] = val
+  function pathToName(path) {
+    let p = path.split(',')
+    return p[p.length - 1].split('.')[0]
   }
 
-  const removeComponent = key => {
-    delete Flint.views[key]
-    delete opts.namespace[key]
+  // devtools edit
+  function writeBack(path, writePath) {
+    // update getCache
+    writePath.reduce((acc, key) => {
+      if (key == 'root') return acc
+      if (Array.isArray(key))
+        acc[key[0]] = key[1] // final index is arr: [key, val]
+      else
+        return acc[key]
+    }, Internal.getCache[path])
+
+    // update view
+    const name = pathToName(path)
+    Flint.render()
   }
 
-  const setComponent = (key, val) => (opts.namespace[key] = val)
-  const getComponent = (key) => opts.namespace[key]
+  function setInspector(path) {
+    if (Internal.inspector.path && Internal.inspector.path == path) {
+      const name = pathToName(path)
+      let props = Internal.viewsAtPath[path].props
+      const state = Internal.getCache[path]
+      Internal.inspector.cb(name, props, state, writeBack)
+    }
+  }
+
   const emitter = ee({})
 
   let Flint = {
-    isUpdating: false,
+    init() {
+      router.init({ onChange: Flint.render })
+      Flint.render()
+    },
+
+    router,
+    range,
+    iff,
+
     views: {},
-    lastWorkingView: {},
-    // async functions needed before loading app
-    preloaders: [],
-    element: createElement,
-    render,
-    on(name, cb) { emitter.on(name, cb) },
-    // map of views in various files
-    viewCache: {},
-    // current build up of running hot insertion
-    viewsInFile: {},
-    // current file that is running
-    currentHotFile: null,
-
-    file(file, run) {
-      Flint.viewsInFile[file] = []
-      Flint.currentHotFile = file
-      let fileExports
-
-      fileExports = run({})
-
-      Flint.setExports(fileExports)
-      const cached = Flint.viewCache[file] || []
-      const views = Flint.viewsInFile[file]
-
-      // remove views that werent made
-      const removed = arrayDiff(cached, views)
-      removed.map(removeComponent)
-
-      Flint.currentHotFile = null
-      Flint.viewCache[file] = Flint.viewsInFile[file]
-
-      raf(() => {
-        Flint.isLoadingFile = true
-        render()
-        Flint.isLoadingFile = false
-
-        // its been updated
-        Object.keys(Flint.views).forEach(key => {
-          Flint.views[key].needsUpdate = false
-        })
-      })
+    removeView(key) {
+      delete Flint.views[key]
     },
 
-    makeReactComponent(name, component, options = {}) {
-      const spec = {
-        displayName: name,
-        el: createElement,
-        name,
-        Flint,
+    render() {
+      if (Internal.preloaders.length)
+        Promise.all(Internal.preloaders.map(loader => loader())).then(run)
+      else
+        run()
 
-        update() {
-          if (
-            !Flint.isUpdating &&
-            this.hasRun &&
-            this.isMounted &&
-            !this.isPaused
-          )
-            this.forceUpdate()
-        },
+      function run() {
+        Internal.isRendering++
+        log(`render(), Internal.isRendering(${Internal.isRendering})`)
+        if (Internal.isRendering > 3) return
 
-        getInitialState() {
-          if (name == 'Main')
-            Flint.mainView = this
+        const MainComponent = (
+            Flint.views.Main.component || Internal.lastWorkingViews.Main.component
+        )
 
-          this.styles = {}
-          this.events = {
-            mount: [],
-            unmount: [],
-            update: [],
-            props: []
-          };
-
-          const viewOn = (scope, name, cb) => {
-            // check if they defined their own scope
-            if (name && typeof name == 'string')
-              return on(scope, name, cb)
-            else
-              return on(this, scope, name)
-          }
-
-           // watch for errors with ran
-          let ran = false
-
-          // TODO: comments out part was attempt to save child
-          // state when parent is reloaded, but wed need path key
-          // needsUpdate if hash changed
-          // if (Flint.views[name].needsUpdate) {
-            safeRun(() => {
-              component.call(void 0, this, viewOn)
-              // Flint.cachedRenders[name] = this._render
-              ran = true
-            })
-          // }
-          // else {
-          //   this._render = Flint.cachedRenders[name]
-          // }
-
-          this.hasRun = ran
-          return null
-        },
-
-        componentWillReceiveProps(nextProps) {
-          this.props = nextProps
-          runEvents(this.events, 'props')
-        },
-
-        componentDidMount() {
-          this.isMounted = true
-          runEvents(this.events, 'mount')
-        },
-
-        componentWillUnmount() {
-          this.isMounted = false
-          runEvents(this.events, 'unmount')
-        },
-
-        componentWillUpdate() {
-          Flint.isUpdating = true
-          runEvents(this.events, 'update')
-          Flint.isUpdating = false
-        },
-
-        // FLINT HELPERS
-
-        // helpers for controlling re-renders
-        pause() { this.isPaused = true },
-        resume() { this.isPaused = false },
-
-        // helpers for context
-        childContextTypes: {},
-        childContext(obj) {
-          if (!obj) return
-
-          Object.keys(obj).forEach(key => {
-            this.constructor.childContextTypes[key] =
-              React.PropTypes[typeof obj[key]]
-          })
-
-          this.getChildContext = () => obj
-        },
-
-        render() {
-          let els
-
-          if (process.env.production)
-            els = this._render()
-          else {
-            try {
-              els = this._render()
-              this.goodRastRender = els // cache
-            }
-            catch(e) {
-              const { name, message, stack } = e
-              reportError({ name, message, stack })
-              console.error('Error rendering JSX for view:', name, e)
-              els = this.goodRastRender || null
-            }
-          }
-
-          const wrapperStyle = this.style && this.style['$']
-          const __disableWrapper = wrapperStyle ? wrapperStyle() === false : false
-          const withProps = React.cloneElement(els, { __disableWrapper });
-          const styled = els && resolveStyles(this, withProps)
-          return styled
-        }
-      }
-
-      return React.createClass(spec);
-    },
-
-    getView(name) {
-      if (/Flint\.[\.a-zA-Z0-9]*Wrapper/.test(name))
-        return Wrapper;
-
-      // When importing something, babel may put it into __reactMotion.Spring,
-      // which comes in as a string, so we need to lookup on root
-      if (name.indexOf('.') !== -1) {
-        const appView = name.split('.').reduce((acc, cur) => (acc || {})[cur], root);
-        if (appView) return appView
-      }
-
-      // TODO: this fixes importing a react element, but its sloppy
-      // import Element from 'some-element'; can be used <Element>
-      if (root[name])
-        return root[name]
-
-      // View.SubView
-      const subName = `${view}.${name}`
-      if (Flint.views[subName])
-        return Flint.views[subName].component
-
-      // regular view
-      if (Flint.views[name])
-        return Flint.views[name].component;
-
-      // "global" views
-      if (opts.namespace[name] || root[name])
-        return namespaceView
-
-      return class NotFound extends React.Component {
-        render() {
-          const message = `Flint: view "${name}" not found`
-          return <div style={{ display: 'block' }}>{message}</div>
-        }
-      }
-    },
-
-    /*
-      hash is the build systems hash of the view contents
-        used for detecting changed views
-    */
-    view(name, hash, component) {
-      Flint.viewsInFile[Flint.currentHotFile].push(name)
-
-      // if new
-      if (Flint.views[name] == undefined) {
-        let fComponent = Flint.makeReactComponent(name, component, {
-          isNew: true,
-          hash
-        });
-
-        Flint.views[name] = Flint.makeView(hash, fComponent);
-        Flint.lastWorkingView[name] = Flint.views[name].component;
-        setComponent(name, fComponent) // puts on namespace
-        return
-      }
-
-      // not new
-
-      // if defined twice during first run
-      if (firstRun) {
-        console.error('Defined a view twice!', name, hash)
-        setComponent(name, ErrorDefinedTwice(name))
-        return
-      }
-
-      // if unchanged
-      if (Flint.views[name].hash == hash)
-        return
-
-      // start with a success and an error will fire before next frame
-      root._DT.emitter.emit('runtime:success')
-
-      // if changed
-
-      const setView = (name, flintComponent) => {
-        Flint.views[name] = Flint.makeView(hash, flintComponent)
-        setComponent(name, flintComponent) // puts on namespace
-        if (firstRun) return
-      }
-
-      let viewRanSuccessfully = true
-
-      // recover from bad views
-      window.onerror = (...args) => {
-        viewRanSuccessfully = false
-
-        if (Flint.lastWorkingView[name]) {
-          setView(name, Flint.lastWorkingView[name])
-          render()
+        if (!browserNode) {
+          Flint.renderedToString = React.renderToString(<MainComponent />)
+          afterRenderCb && afterRenderCb(Flint.renderedToString)
         }
         else {
-          setView(name, ErrorDefinedTwice(name))
-          render()
+          if (window.__isDevingDevTools)
+            browserNode = '_flintdevtools'
+
+          ReactDOM.render(<MainComponent />, document.getElementById(browserNode))
         }
+
+        Internal.firstRender = false
+        emitter.emit('afterRender')
+        Internal.isRendering = 0
+      }
+    },
+
+    // internal events
+    on(name, cb) { emitter.on(name, cb) },
+
+    // for use in jsx
+    debug: () => { debugger },
+
+    // load a file
+    file(file, run) {
+      if (!process.env.production) {
+        Internal.viewsInFile[file] = []
+        Internal.changedViews = []
+        Internal.currentHotFile = file
       }
 
-      Flint.on('afterRender', () => {
-        if (viewRanSuccessfully)
-          Flint.lastWorkingView[name] = Flint.views[name].component
-      })
+      // capture exports
+      let fileExports = {}
 
-      let flintComponent = Flint.makeReactComponent(name, component, { isChanged: true })
-      setView(name, flintComponent)
+      // run file
+      run(fileExports)
 
-      // tools errors todo
-      window.onViewLoaded()
+      Flint.setExports(fileExports)
+
+      if (!process.env.production) {
+        const cached = Internal.viewCache[file] || Internal.viewsInFile[file]
+        const views = Internal.viewsInFile[file]
+
+        // remove Internal.viewsInFile that werent made
+        const removed = arrayDiff(cached, views)
+        removed.map(Flint.removeView)
+
+        Internal.currentHotFile = null
+        Internal.viewCache[file] = Internal.viewsInFile[file]
+
+        if (Internal.firstRender)
+          return
+
+        raf(() => {
+          const added = arrayDiff(views, cached)
+
+          // send runtime success before render
+          if (Tools)
+            Tools.emitter.emit('runtime:success')
+
+          // if removed, just root
+          if (removed.length || added.length)
+            return Flint.render()
+
+          Internal.changedViews.forEach(name => {
+            Internal.mountedViews[name] = Internal.mountedViews[name].map(view => {
+              if (view.isMounted()) {
+                view.forceUpdate()
+                return view
+              }
+            }).filter(x => !!x)
+          })
+        })
+      }
     },
 
-    makeView(hash, component) {
-      return { hash, component, needsUpdate: true };
+    view(name, body) {
+      const comp = createComponent.partial(Flint, Internal, name, body)
+
+      if (process.env.production)
+        return setView(name, comp())
+
+      function setView(name, component) {
+        Flint.views[name] = { hash, component }
+      }
+
+      // set view in cache
+      let viewsInCurrentFile = Internal.viewsInFile[Internal.currentHotFile]
+
+      if (!viewsInCurrentFile)
+        debugger
+
+      viewsInCurrentFile.push(name)
+
+      const hash = hashsum(body)
+
+      // if new
+      if (!Flint.views[name]) {
+        setView(name, comp({ hash, changed: true }))
+        Internal.changedViews.push(name)
+        return
+      }
+
+      // hot reloaded
+      if (!process.env.production) {
+        if (!Internal.mountedViews[name])
+          Internal.mountedViews[name] = []
+
+        // not new
+        // if defined twice during first run
+        if (Internal.firstRender) {
+          Flint.views[name] = ErrorDefinedTwice(name)
+          throw new Error(`Defined a view twice: ${name}`)
+        }
+
+        // if unchanged
+        if (Flint.views[name].hash == hash) {
+          setView(name, comp({ hash, unchanged: true }))
+          return
+        }
+
+        // changed
+        setView(name, comp({ hash, changed: true }))
+        Internal.changedViews.push(name)
+
+        // this resets tool errors
+        window.onViewLoaded()
+      }
     },
 
-    getStyle(id, name) {
-      return Flint.styles && Flint.styles[id][name]
+    deleteFile(name) {
+      const weirdName = `/${name}`
+      Internal.viewsInFile[weirdName].map(Flint.removeView)
+      delete Internal.viewsInFile[weirdName]
+      delete Internal.viewCache[weirdName]
+      Flint.render()
+    },
+
+    getView(name, parentName) {
+      let result
+
+      // View.SubView
+      const subName = `${parentName}.${name}`
+      if (Flint.views[subName]) {
+        result = Flint.views[subName].component
+      }
+      // regular view
+      else if (Flint.views[name]) {
+        result = Flint.views[name].component
+      }
+      else {
+        result = NotFound(name)
+      }
+
+      return result
+    },
+
+    routeMatch(path) {
+      router.add(path)
+      return router.isActive(path)
+    },
+
+    routeParams(path) {
+      return router.params(path)
     },
 
     // export globals
     setExports(_exports) {
       if (!_exports) return
+      Object.freeze(_exports)
       const names = Object.keys(_exports)
 
       if (names.length) {
@@ -406,27 +343,28 @@ function run(browserNode, userOpts, afterRenderCb) {
           assignToGlobal(name, _exports[name])
         })
       }
+    },
+
+    inspect(path, cb) {
+      Internal.inspector = { path, cb }
+      setInspector(path)
     }
   }
 
-  // make mutative array methods trigger updates in views
-  const mutators = ['push', 'reverse', 'splice', 'shift', 'pop', 'unshift', 'sort']
-  mutators.map(method => {
-    const vanilla = Array.prototype[method]
+  // shim root view
+  opts.namespace.view = {
+    update: () => {},
+    el: createElement('_'),
+    Flint
+  }
+  opts.namespace.Flint = Flint
 
-    Array.prototype[method] = function(...args) {
-      const result = vanilla.apply(this, args)
+  // prevent overwriting
+  Object.freeze(Flint)
 
-      // do view update
-
-      return result
-    }
-  })
-
-  // set flint onto namespace
-  opts.namespace.Flint = Flint;
-
-  return Flint;
+  return Flint
 }
 
-export default run
+function log(...args) {
+  if (window.location.search == '?debug') console.log(...args)
+}

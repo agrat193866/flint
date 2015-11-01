@@ -10,12 +10,11 @@ const getFirstChild = children => {
 
 class Wrapper extends React.Component {
   render() {
-    const { children, style, onClick, __disableWrapper, view } = this.props;
+    return this.props.children
 
-    let viewProps
+    const { children, style, onClick, __disableWrapper, view, path } = this.props;
 
-    if (style || onClick)
-      viewProps = {}
+    let viewProps = { view }
 
     if (onClick)
       viewProps.onClick = onClick
@@ -34,21 +33,24 @@ class Wrapper extends React.Component {
 
       // if tagname === viewname
       if (type && type.toLowerCase && type.toLowerCase() == view.name.toLowerCase())
-        return first
+        return React.cloneElement(first, { 'data-flintid': path })
       else
-        return wrapped(view.name, viewProps, children)
+        return wrapped(view.name, viewProps, children, path)
     }
     else {
-      return wrapped(view.name, viewProps, children)
+      return wrapped(view.name, viewProps, children, path)
     }
   }
 }
 
-function wrapped(name, props, children) {
-  return (
-    <div className={name && name.toLowerCase()} {...props} ref="view">
-      {children}
-    </div>
+function wrapped(name, props, children, path) {
+  return React.createElement(
+    'div', // why not name? because view Circle needs to be whitelisted (svg element)
+    Object.assign(props, {
+      'data-flintid': path,
+      className: name && name.toLowerCase()
+    }),
+    children
   )
 }
 
